@@ -284,6 +284,7 @@ def run_check(state: dict, dry_run: bool) -> tuple[list[IssueChange], bool]:
     if not core.JIRA_EMAIL or not core.JIRA_API_TOKEN:
         issues = _sim_issues_with_change()
     else:
+        core.verify_jira_auth()
         issues = core.fetch_all_issues()
 
     snapshots = state.get("issue_snapshots", {})

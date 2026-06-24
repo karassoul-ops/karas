@@ -129,6 +129,22 @@ def _auth_header() -> str:
     return "Basic " + base64.b64encode(cred.encode()).decode()
 
 
+def verify_jira_auth() -> str:
+    """인증 검증: /rest/api/3/myself 호출 → 성공 시 displayName 반환, 실패 시 RuntimeError"""
+    try:
+        data = jira_get("/myself")
+        name = data.get("displayName") or data.get("emailAddress") or "알 수 없음"
+        log.info("Jira 인증 성공: %s (%s)", name, data.get("emailAddress", ""))
+        return name
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise RuntimeError(
+            f"Jira 인증 실패 (HTTP {e.code}). "
+            f"GitHub Secret JIRA_EMAIL / JIRA_API_TOKEN 값을 확인하세요.\n"
+            f"응답: {body[:300]}"
+        ) from e
+
+
 def jira_get(path: str, params: dict | None = None) -> dict:
     url = API_BASE + path
     if params:
@@ -1081,6 +1097,7 @@ def main() -> None:
 
     log.info("Jira 이슈 조회 시작: %s", PROJECT_KEY)
     try:
+        verify_jira_auth()
         issues = fetch_all_issues(since_date=args.since)
     except Exception as exc:
         log.error("Jira 조회 실패: %s", exc)

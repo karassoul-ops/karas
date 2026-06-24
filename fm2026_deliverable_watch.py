@@ -466,6 +466,7 @@ def watch_deliverables(
         log.warning("JIRA 인증정보 미설정 → 시뮬레이션 모드")
         issues = _sim_issues()
     else:
+        core.verify_jira_auth()
         issues = core.fetch_all_issues()
 
     new_actions: list[core.CommentAction] = []

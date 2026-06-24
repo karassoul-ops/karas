@@ -111,10 +111,12 @@ class PMOReport:
     no_due_date: list = field(default_factory=list)
     expired: list = field(default_factory=list)
     alert_6h: list = field(default_factory=list)
+    due_this_week: list = field(default_factory=list)   # 이번 주 만료 예정 (key, title, due)
+    by_assignee: dict = field(default_factory=dict)     # 담당자별 현황
     unreadable_files: list = field(default_factory=list)
     asis_tobe_needed: list = field(default_factory=list)
-    currentization_needed: list = field(default_factory=list)  # 현행화 필요
-    pending_actions: list = field(default_factory=list)        # 검토 대기 댓글
+    currentization_needed: list = field(default_factory=list)
+    pending_actions: list = field(default_factory=list)
     posted_comments: list = field(default_factory=list)
     skipped_comments: list = field(default_factory=list)
     note: str = ""
@@ -740,6 +742,32 @@ def analyze_issues(
 
         is_done = status in ("해결됨", "완료", "Done", "Resolved", "Closed")
 
+        # 담당자별 현황 집계
+        assignee = (fields.get("assignee") or {}).get("displayName", "미지정")
+        astat = report.by_assignee.setdefault(assignee, {"진행": 0, "완료": 0, "지연": 0})
+        if is_done:
+            astat["완료"] += 1
+        else:
+            astat["진행"] += 1
+
+        # 이번 주 만료 예정 (오늘~7일 이내, 미완료 이슈)
+        due_str = fields.get("duedate", "")
+        if due_str and not is_done:
+            try:
+                due_dt = datetime.strptime(due_str, "%Y-%m-%d").replace(tzinfo=KST)
+                days_left = (due_dt - now).days
+                if 0 <= days_left <= 7:
+                    report.due_this_week.append({
+                        "key": key,
+                        "summary": fields.get("summary", "")[:50],
+                        "due": due_str,
+                        "days_left": days_left,
+                    })
+                if days_left < 0 and not is_done:
+                    astat["지연"] += 1
+            except ValueError:
+                pass
+
         # ── (1) 만료 체크 ─────────────────────────────────────────────────────
         exp_status, delta = check_expiry(issue, now)
 
@@ -855,10 +883,10 @@ RECOMMENDATIONS = """
   ⑩ 농정원 담당자와 월 1회 이상 공식 회의 + 회의록 Jira 첨부.
 
 【자동화 활용】
-  ⑪ 이 프로그램을 매일 1회 실행하세요:
-       cron: 0 9 * * 1-5 python /path/to/fm2026_pmo_auto.py --post-comments
-     또는 스케줄러 사용:
-       python fm2026_pmo_scheduler.py --post-comments
+  ⑪ 자동 스케줄러(fm2026_scheduler.yml)가 평일 09:00/17:00 KST에 자동 실행됩니다.
+     GitHub Actions → FM2026 통합 자동 스케줄러에서 실행 이력을 확인하세요.
+     수동 즉시 실행: python fm2026_pmo_auto.py --post-comments
+     현황 대시보드:  python fm2026_pmo_auto.py --dashboard
 
   ⑫ 댓글 등록 전 반드시 --review 옵션으로 근거를 확인하고 판단하세요.
 
@@ -869,6 +897,84 @@ RECOMMENDATIONS = """
   □ 주요 산출물 현행화 여부 점검
   □ 미등록 산출물 이슈 독려
 """
+
+
+def print_dashboard(report: PMOReport) -> None:
+    """사업담당자용 컴팩트 현황 대시보드"""
+    W = 70
+    now_str = report.generated_at
+
+    def bar(done: int, total: int, width: int = 30) -> str:
+        if total == 0:
+            return "─" * width + " (이슈 없음)"
+        filled = int(round(done / total * width))
+        pct = done / total * 100
+        return "█" * filled + "░" * (width - filled) + f" {pct:.0f}% ({done}/{total})"
+
+    print("\n" + "═" * W)
+    print("  FM2026 팜맵 사업 현황 대시보드")
+    print(f"  기준: {now_str}")
+    print("═" * W)
+
+    # ── 진척률 ────────────────────────────────────────────────────────────
+    total = report.total_issues
+    done  = len(report.completed)
+    print(f"\n  진척률  {bar(done, total)}")
+
+    # ── 즉시 조치 필요 ─────────────────────────────────────────────────────
+    urgent = report.expired + [i["issue_key"] if isinstance(i, dict) else i
+                                for i in report.unreadable_files]
+    urgent_keys = list(dict.fromkeys(urgent))          # 중복 제거·순서 유지
+
+    if urgent_keys or report.no_due_date:
+        print(f"\n  🚨 즉시 조치 필요")
+        for key in urgent_keys:
+            label = "기간 초과" if key in report.expired else "읽기 불가 산출물"
+            print(f"     🔴 {key}  [{label}]")
+        for key in report.no_due_date[:5]:
+            print(f"     🟠 {key}  [기한 미등록]")
+        if len(report.no_due_date) > 5:
+            print(f"     🟠 … 외 {len(report.no_due_date)-5}건 기한 미등록")
+    else:
+        print(f"\n  ✅ 즉시 조치 필요 항목 없음")
+
+    # ── 이번 주 만료 예정 ─────────────────────────────────────────────────
+    week_items = sorted(report.due_this_week, key=lambda x: x.get("days_left", 99))
+    if week_items:
+        print(f"\n  📅 이번 주 만료 예정 ({len(week_items)}건)")
+        for item in week_items[:7]:
+            days = item.get("days_left", 0)
+            label = "오늘" if days == 0 else f"D-{days}"
+            print(f"     [{item['key']}] {label}  {item['due']}  {item['summary']}")
+    else:
+        print(f"\n  📅 이번 주 만료 예정: 없음")
+
+    # ── 담당자별 현황 ─────────────────────────────────────────────────────
+    if report.by_assignee:
+        print(f"\n  👤 담당자별 현황")
+        sorted_assignees = sorted(
+            report.by_assignee.items(),
+            key=lambda kv: kv[1].get("지연", 0),
+            reverse=True,
+        )
+        for name, stat in sorted_assignees:
+            delay_mark = " ⚠️ 지연" if stat.get("지연", 0) > 0 else ""
+            print(f"     {name:<12}  진행 {stat['진행']:>2}  완료 {stat['완료']:>2}  지연 {stat['지연']:>2}{delay_mark}")
+
+    # ── 산출물 현황 ───────────────────────────────────────────────────────
+    print(f"\n  📁 산출물 관리")
+    print(f"     읽기 불가         : {len(report.unreadable_files)}건")
+    print(f"     현행화 필요       : {len(report.currentization_needed)}건")
+    print(f"     As-Is/To-Be 필요  : {len(report.asis_tobe_needed)}건")
+
+    # ── 댓글 처리 현황 ────────────────────────────────────────────────────
+    print(f"\n  💬 자동 댓글")
+    print(f"     등록 완료  {len(report.posted_comments)}건  /  대기 {len(report.pending_actions)}건  /  스킵 {len(report.skipped_comments)}건")
+
+    print("\n" + "═" * W)
+    print("  수동 조치: python fm2026_pmo_auto.py --review  (전체 검토 리포트)")
+    print("  댓글 등록: python fm2026_pmo_auto.py --post-comments")
+    print("═" * W + "\n")
 
 
 def print_pmo_report(report: PMOReport) -> None:
@@ -927,6 +1033,8 @@ def main() -> None:
         description="FM2026 팜맵 사업 PMO 자동화 v2.0",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--dashboard",     action="store_true",
+                        help="사업담당자용 현황 대시보드 출력 (댓글 미등록)")
     parser.add_argument("--review",        action="store_true",
                         help="근거 포함 전체 검토 리포트 출력 (댓글 미등록)")
     parser.add_argument("--post-comments", action="store_true",
@@ -937,12 +1045,15 @@ def main() -> None:
                         help="해당 날짜 이후 업데이트된 이슈만 처리 (예: 2026-06-01)")
     args = parser.parse_args()
 
-    dry_run     = not args.post_comments
-    review_mode = args.review
+    dry_run        = not args.post_comments
+    review_mode    = args.review
+    dashboard_mode = args.dashboard
 
-    if dry_run and not review_mode:
+    if dashboard_mode:
+        log.info("=== 대시보드 모드 — 사업 현황 요약 ===")
+    elif dry_run and not review_mode:
         log.info("=== DRY-RUN 모드 (기본) — 댓글 미등록 ===")
-        log.info("검토 리포트: --review | 실제 등록: --post-comments")
+        log.info("대시보드: --dashboard | 검토 리포트: --review | 실제 등록: --post-comments")
     elif review_mode:
         log.info("=== 검토 모드 — 댓글 근거 및 미리보기 출력 ===")
     else:
@@ -950,7 +1061,7 @@ def main() -> None:
 
     if not JIRA_EMAIL or not JIRA_API_TOKEN:
         log.warning("JIRA_EMAIL / JIRA_API_TOKEN 미설정 → 시뮬레이션 모드")
-        _run_simulation(dry_run, review_mode, args.issue)
+        _run_simulation(dry_run, review_mode, dashboard_mode, args.issue)
         return
 
     log.info("Jira 이슈 조회 시작: %s", PROJECT_KEY)
@@ -962,15 +1073,17 @@ def main() -> None:
 
     report = analyze_issues(
         issues,
-        dry_run=dry_run,
+        dry_run=dry_run or dashboard_mode,
         target_key=args.issue,
         review_mode=review_mode,
     )
-    if not review_mode:
+    if dashboard_mode:
+        print_dashboard(report)
+    elif not review_mode:
         print_pmo_report(report)
 
 
-def _run_simulation(dry_run: bool, review_mode: bool, target_key: str | None) -> None:
+def _run_simulation(dry_run: bool, review_mode: bool, dashboard_mode: bool, target_key: str | None) -> None:
     """환경변수 미설정 시 현재 파악된 이슈 데이터로 시뮬레이션"""
     now = now_kst()
     # 만료 임박 이슈를 시뮬레이션하기 위해 현재 시간 기준으로 기한 설정
@@ -1086,13 +1199,15 @@ def _run_simulation(dry_run: bool, review_mode: bool, target_key: str | None) ->
     issues = [i for i in sample_issues if (target_key is None or i["key"] == target_key)]
     report = analyze_issues(
         issues,
-        dry_run=dry_run,
+        dry_run=dry_run or dashboard_mode,
         target_key=target_key,
         review_mode=review_mode,
     )
     report.note = "시뮬레이션 모드 (JIRA_EMAIL/JIRA_API_TOKEN 미설정)"
     report.total_issues = 182
-    if not review_mode:
+    if dashboard_mode:
+        print_dashboard(report)
+    elif not review_mode:
         print_pmo_report(report)
 
 

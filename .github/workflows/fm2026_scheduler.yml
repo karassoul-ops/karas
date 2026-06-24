@@ -91,7 +91,15 @@ jobs:
         run: python fm2026_deliverable_watch.py --post-comments
 
       # ── PMO 자동화 (평일 09:00 / 17:00 KST) ────────────────────────────
-      - name: PMO 자동화 실행
+      - name: 사업 현황 대시보드 출력
+        if: steps.decide.outputs.run_pmo == 'true'
+        env:
+          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
+        run: python fm2026_pmo_auto.py --dashboard
+
+      - name: PMO 자동화 실행 (댓글 등록)
         if: steps.decide.outputs.run_pmo == 'true'
         env:
           JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}

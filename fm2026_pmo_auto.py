@@ -189,33 +189,33 @@ def jira_post_comment(issue_key: str, body_text: str) -> dict:
 
 
 def fetch_all_issues(since_date: str | None = None) -> list[dict]:
-    """FM2026 전체 이슈 조회 (since_date: 'YYYY-MM-DD' 이후 업데이트된 이슈만)"""
+    """FM2026 전체 이슈 조회 — POST /rest/api/3/search/jql (nextPageToken 커서 방식)"""
     issues: list[dict] = []
-    start = 0
     max_results = 100
-    fields = (
-        "summary,status,issuetype,assignee,reporter,created,updated,"
-        "duedate,priority,description,comment,attachment,labels,components,parent"
-    )
+    fields = [
+        "summary", "status", "issuetype", "assignee", "reporter",
+        "created", "updated", "duedate", "priority", "description",
+        "comment", "attachment", "labels", "components", "parent",
+    ]
     jql_base = f'project = "{PROJECT_KEY}"'
     if since_date:
         jql_base += f' AND updated >= "{since_date}"'
     jql = jql_base + " ORDER BY updated DESC"
 
+    next_page_token: str | None = None
     while True:
-        data = jira_post_search({
-            "jql": jql,
-            "startAt": start,
-            "maxResults": max_results,
-            "fields": fields.split(","),
-        })
+        payload: dict = {"jql": jql, "maxResults": max_results, "fields": fields}
+        if next_page_token:
+            payload["nextPageToken"] = next_page_token
+        data = jira_post_search(payload)
         batch = data.get("issues", [])
-        issues.extend(batch)
-        total = data.get("total", 0)
-        log.info("이슈 조회 중: %d / %d", len(issues), total)
-        if start + max_results >= total:
+        if not batch:
             break
-        start += max_results
+        issues.extend(batch)
+        log.info("이슈 조회 중: %d건 (total=%s)", len(issues), data.get("total", "?"))
+        next_page_token = data.get("nextPageToken")
+        if not next_page_token:
+            break
     return issues
 
 

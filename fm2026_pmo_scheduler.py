@@ -32,8 +32,9 @@ from datetime import datetime, timezone, timedelta
 KST = timezone(timedelta(hours=9))
 
 
-def run_once(post: bool = False, review: bool = False, issue: str = "") -> int:
-    cmd = [sys.executable, "fm2026_pmo_auto.py"]
+def run_once(post: bool = False, review: bool = False, issue: str = "",
+             script: str = "fm2026_pmo_auto.py") -> int:
+    cmd = [sys.executable, script]
     if post:
         cmd.append("--post-comments")
     if review:
@@ -43,7 +44,8 @@ def run_once(post: bool = False, review: bool = False, issue: str = "") -> int:
 
     ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     mode = "LIVE" if post else ("REVIEW" if review else "DRY-RUN")
-    print(f"\n[{ts}] FM2026 PMO 자동화 실행 ({mode})")
+    label = "산출물 감시" if "watch" in script else "PMO 자동화"
+    print(f"\n[{ts}] FM2026 {label} 실행 ({mode})")
     print(f"  명령어: {' '.join(cmd)}")
     print("-" * 60)
 
@@ -53,6 +55,21 @@ def run_once(post: bool = False, review: bool = False, issue: str = "") -> int:
     else:
         print(f"[완료] 정상 종료")
     return result.returncode
+
+
+def run_watch_loop(interval_min: int, post: bool, review: bool, issue: str) -> None:
+    """1시간(기본) 단위로 신규 산출물 감시 실행"""
+    print(f"\n산출물 감시 모드: {interval_min}분 간격으로 신규 산출물을 점검합니다.")
+    run_once(post=post, review=review, issue=issue, script="fm2026_deliverable_watch.py")
+    while True:
+        next_run = datetime.now(KST) + timedelta(minutes=interval_min)
+        print(f"\n다음 산출물 점검: {next_run.strftime('%Y-%m-%d %H:%M KST')}")
+        try:
+            time.sleep(interval_min * 60)
+        except KeyboardInterrupt:
+            print("\n산출물 감시 종료")
+            break
+        run_once(post=post, review=review, issue=issue, script="fm2026_deliverable_watch.py")
 
 
 def main() -> None:
@@ -72,7 +89,24 @@ def main() -> None:
     parser.add_argument("--times",         metavar="HH:MM", nargs="+",
                         default=["09:00", "17:00"],
                         help="--daily 실행 시각 목록 (기본: 09:00 17:00)")
+    parser.add_argument("--watch",         action="store_true",
+                        help="1시간 단위 신규 산출물 감시·분석 모드")
     args = parser.parse_args()
+
+    # ── 산출물 감시 모드 (1시간 단위) ─────────────────────────────────────
+    if args.watch:
+        interval = args.interval if args.interval != 60 else 60  # 기본 60분
+        print("=" * 60)
+        print("  FM2026 산출물 신규 등록 감시 스케줄러")
+        print(f"  실행 모드 : {'LIVE' if args.post_comments else ('REVIEW' if args.review else 'DRY-RUN')}")
+        print(f"  점검 간격 : {interval}분")
+        print("=" * 60)
+        if args.once:
+            run_once(post=args.post_comments, review=args.review,
+                     issue=args.issue, script="fm2026_deliverable_watch.py")
+        else:
+            run_watch_loop(interval, args.post_comments, args.review, args.issue)
+        return
 
     mode_str = "LIVE (실제 댓글 등록)" if args.post_comments else (
         "REVIEW (검토 리포트)" if args.review else "DRY-RUN (미리보기)"

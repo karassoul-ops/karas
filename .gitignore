@@ -2,6 +2,9 @@
 *.log
 fm2026_pmo_report_*.json
 
+# 산출물 감시 상태파일 (실행 환경별로 다름)
+.fm2026_seen_attachments.json
+
 # Python
 __pycache__/
 *.pyc

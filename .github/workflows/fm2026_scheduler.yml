@@ -47,9 +47,10 @@ jobs:
           event = os.environ.get('GITHUB_EVENT_NAME', 'schedule')
           force = event in ('workflow_dispatch', 'push')
 
-          in_window  = force or (m < 10)          # 매시간 0~9분 창
-          pmo_time   = force or (in_window and wd <= 5 and h in (9, 17))
-          watch_time = in_window
+          # 감시는 매 실행마다 (GitHub 지연 실행에도 항상 동작)
+          watch_time = True
+          # PMO는 평일 09:xx / 17:xx 시간대에만 (분 무관 — GitHub 지연 대응)
+          pmo_time   = force or (wd <= 5 and h in (9, 17))
 
           print(f"KST {now:%Y-%m-%d %H:%M} 요일={wd} 이벤트={event}")
           print(f"  → PMO실행={pmo_time}  감시실행={watch_time}")

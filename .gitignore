@@ -1,0 +1,13 @@
+# PMO 자동화 로그 및 리포트
+*.log
+fm2026_pmo_report_*.json
+
+# 산출물 감시 상태파일 (실행 환경별로 다름)
+.fm2026_seen_attachments.json
+.fm2026_watch_state.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env

@@ -1,0 +1,106 @@
+name: FM2026 스마트 적응형 감시 (1시간 단위)
+
+on:
+  # 매시간 정각 실행 — 무변화 2회 감지 시 로직 내부에서 조기 종료
+  schedule:
+    - cron: "0 * * * *"
+
+  # 수동 실행 (즉시 점검 또는 초기화)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "실행 모드"
+        required: true
+        default: "post-comments"
+        type: choice
+        options:
+          - post-comments
+          - review
+          - dry-run
+      reset:
+        description: "상태 초기화 (전체 재분석)"
+        required: false
+        default: false
+        type: boolean
+
+# 동시 실행 방지 (상태파일 경쟁 방지)
+concurrency:
+  group: fm2026-smart-watch
+  cancel-in-progress: false
+
+jobs:
+  smart-watch:
+    name: 스마트 적응형 감시 1회 점검
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 감시 상태파일 복원 (연속 무변화 카운터·스냅샷 보존)
+      - name: 감시 상태파일 복원
+        uses: actions/cache@v4
+        with:
+          path: |
+            .fm2026_watch_state.json
+            .fm2026_seen_attachments.json
+          key: fm2026-watch-state-${{ github.run_id }}
+          restore-keys: |
+            fm2026-watch-state-
+
+      - name: 스마트 감시 실행 (스케줄)
+        if: github.event_name == 'schedule'
+        env:
+          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
+        run: python fm2026_smart_watch.py --post-comments --once
+
+      - name: 스마트 감시 실행 (수동 - post-comments)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'post-comments'
+        env:
+          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
+        run: |
+          ARGS="--post-comments --once"
+          [ "${{ github.event.inputs.reset }}" = "true" ] && ARGS="$ARGS --reset"
+          python fm2026_smart_watch.py $ARGS
+
+      - name: 스마트 감시 실행 (수동 - review)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'review'
+        env:
+          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
+        run: |
+          ARGS="--review --once"
+          [ "${{ github.event.inputs.reset }}" = "true" ] && ARGS="$ARGS --reset"
+          python fm2026_smart_watch.py $ARGS
+
+      - name: 스마트 감시 실행 (수동 - dry-run)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'dry-run'
+        env:
+          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
+        run: |
+          ARGS="--once"
+          [ "${{ github.event.inputs.reset }}" = "true" ] && ARGS="$ARGS --reset"
+          python fm2026_smart_watch.py $ARGS
+
+      # 상태파일 저장 (다음 실행에서 무변화 카운터 유지)
+      - name: 감시 상태파일 저장
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .fm2026_watch_state.json
+            .fm2026_seen_attachments.json
+          key: fm2026-watch-state-${{ github.run_id }}

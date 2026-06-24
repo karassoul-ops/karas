@@ -145,8 +145,8 @@ def jira_get(path: str, params: dict | None = None) -> dict:
 
 
 def jira_post_search(payload: dict) -> dict:
-    """POST /rest/api/3/search — offset 기반 페이지네이션 (안정적)"""
-    url = API_BASE + "/search"
+    """POST /rest/api/3/search/jql — cursor 기반 페이지네이션"""
+    url = API_BASE + "/search/jql"
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         url,
@@ -164,6 +164,9 @@ def jira_post_search(payload: dict) -> dict:
             result = json.loads(body)
             if "errorMessages" in result and result["errorMessages"]:
                 raise RuntimeError(f"Jira API 오류: {result['errorMessages']}")
+            if "issues" not in result:
+                log.error("예상치 못한 응답 구조: %s", body[:500])
+                raise RuntimeError(f"Jira 응답에 issues 키 없음: {body[:300]}")
             return result
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
@@ -200,9 +203,9 @@ def jira_post_comment(issue_key: str, body_text: str) -> dict:
 
 
 def fetch_all_issues(since_date: str | None = None) -> list[dict]:
-    """FM2026 전체 이슈 조회 — POST /rest/api/3/search (startAt 오프셋 방식)"""
+    """FM2026 전체 이슈 조회 — POST /rest/api/3/search/jql (nextPageToken 커서 방식)"""
     issues: list[dict] = []
-    max_results = 100
+    max_results = 50
     fields = [
         "summary", "status", "issuetype", "assignee", "reporter",
         "created", "updated", "duedate", "priority", "description",
@@ -213,23 +216,21 @@ def fetch_all_issues(since_date: str | None = None) -> list[dict]:
         jql_base += f' AND updated >= "{since_date}"'
     jql = jql_base + " ORDER BY updated DESC"
 
-    start_at = 0
+    log.info("JQL: %s", jql)
+    next_page_token: str | None = None
     while True:
-        payload: dict = {
-            "jql": jql,
-            "maxResults": max_results,
-            "startAt": start_at,
-            "fields": fields,
-        }
+        payload: dict = {"jql": jql, "maxResults": max_results, "fields": fields}
+        if next_page_token:
+            payload["nextPageToken"] = next_page_token
         data = jira_post_search(payload)
         batch = data.get("issues", [])
-        total = data.get("total", 0)
+        log.info("페이지 조회: %d건 (nextPageToken=%s)", len(batch), bool(data.get("nextPageToken")))
         if not batch:
             break
         issues.extend(batch)
-        log.info("이슈 조회 중: %d/%d건", len(issues), total)
-        start_at += len(batch)
-        if start_at >= total:
+        log.info("이슈 누계: %d건", len(issues))
+        next_page_token = data.get("nextPageToken")
+        if not next_page_token:
             break
     log.info("이슈 조회 완료: 총 %d건", len(issues))
     return issues

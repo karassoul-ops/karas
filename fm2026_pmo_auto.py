@@ -143,7 +143,7 @@ def jira_get(path: str, params: dict | None = None) -> dict:
 
 
 def jira_post_search(payload: dict) -> dict:
-    url = API_BASE + "/search/jql"
+    url = API_BASE + "/search"
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         url,

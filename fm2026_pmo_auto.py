@@ -142,6 +142,23 @@ def jira_get(path: str, params: dict | None = None) -> dict:
         return json.loads(resp.read().decode())
 
 
+def jira_post_search(payload: dict) -> dict:
+    url = API_BASE + "/search/jql"
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": _auth_header(),
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode())
+
+
 def jira_post_comment(issue_key: str, body_text: str) -> dict:
     url = f"{API_BASE}/issue/{issue_key}/comment"
     payload = {
@@ -186,11 +203,11 @@ def fetch_all_issues(since_date: str | None = None) -> list[dict]:
     jql = jql_base + " ORDER BY updated DESC"
 
     while True:
-        data = jira_get("/search", {
+        data = jira_post_search({
             "jql": jql,
             "startAt": start,
             "maxResults": max_results,
-            "fields": fields,
+            "fields": fields.split(","),
         })
         batch = data.get("issues", [])
         issues.extend(batch)

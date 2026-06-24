@@ -5,6 +5,8 @@ FM2026 PMO 자동화 스케줄러 v2.0
 
 실행 방식:
   A) 로컬 스케줄러 (직접 실행)
+     python fm2026_pmo_scheduler.py --daily --post-comments   # 매일 09:00, 17:00 자동 실행
+     python fm2026_pmo_scheduler.py --daily --times 09:00 13:00 17:00  # 시각 직접 지정
      python fm2026_pmo_scheduler.py                    # 60분 간격, dry-run
      python fm2026_pmo_scheduler.py --post-comments    # 60분 간격, 실제 댓글 등록
      python fm2026_pmo_scheduler.py --interval 30      # 30분 간격
@@ -65,6 +67,11 @@ def main() -> None:
                         help="근거 포함 검토 리포트 출력 모드")
     parser.add_argument("--issue",         metavar="KEY", default="",
                         help="특정 이슈만 처리")
+    parser.add_argument("--daily",         action="store_true",
+                        help="매일 지정 시각(기본 09:00, 17:00)에 실행")
+    parser.add_argument("--times",         metavar="HH:MM", nargs="+",
+                        default=["09:00", "17:00"],
+                        help="--daily 실행 시각 목록 (기본: 09:00 17:00)")
     args = parser.parse_args()
 
     mode_str = "LIVE (실제 댓글 등록)" if args.post_comments else (
@@ -73,9 +80,19 @@ def main() -> None:
     print("=" * 60)
     print("  FM2026 팜맵 사업 PMO 자동화 스케줄러 v2.0")
     print(f"  실행 모드 : {mode_str}")
-    print(f"  실행 간격 : {args.interval}분" if not args.once else "  실행 방식 : 1회 실행")
+    if args.daily:
+        print(f"  실행 방식 : 매일 고정 시각 {', '.join(args.times)} (KST)")
+    elif args.once:
+        print("  실행 방식 : 1회 실행")
+    else:
+        print(f"  실행 간격 : {args.interval}분")
     print("  종료 방법 : Ctrl+C")
     print("=" * 60)
+
+    # ── 매일 고정 시각 실행 모드 ──────────────────────────────────────────
+    if args.daily:
+        run_daily(args.times, post=args.post_comments, review=args.review, issue=args.issue)
+        return
 
     run_once(post=args.post_comments, review=args.review, issue=args.issue)
 
@@ -91,6 +108,45 @@ def main() -> None:
             print("\n스케줄러 종료")
             break
         run_once(post=args.post_comments, review=args.review, issue=args.issue)
+
+
+def _parse_times(times: list[str]) -> list[tuple[int, int]]:
+    """['09:00', '17:00'] → [(9, 0), (17, 0)]"""
+    parsed = []
+    for t in times:
+        hh, mm = t.split(":")
+        parsed.append((int(hh), int(mm)))
+    return sorted(parsed)
+
+
+def _next_run_at(times: list[tuple[int, int]], now: datetime) -> datetime:
+    """현재 시각 이후 가장 가까운 실행 시각 계산 (KST 기준)"""
+    candidates = []
+    for hh, mm in times:
+        candidate = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if candidate <= now:
+            candidate += timedelta(days=1)
+        candidates.append(candidate)
+    return min(candidates)
+
+
+def run_daily(times: list[str], post: bool = False, review: bool = False, issue: str = "") -> None:
+    """매일 지정된 시각마다 실행 (예: 09:00, 17:00)"""
+    parsed_times = _parse_times(times)
+    print(f"\n매일 {', '.join(times)} (KST)에 자동 실행됩니다.")
+
+    while True:
+        now      = datetime.now(KST)
+        next_run = _next_run_at(parsed_times, now)
+        wait_sec = (next_run - now).total_seconds()
+        print(f"\n다음 실행 예정: {next_run.strftime('%Y-%m-%d %H:%M KST')} "
+              f"(약 {wait_sec/3600:.1f}시간 후 대기)")
+        try:
+            time.sleep(wait_sec)
+        except KeyboardInterrupt:
+            print("\n스케줄러 종료")
+            break
+        run_once(post=post, review=review, issue=issue)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,124 @@
+name: FM2026 통합 자동 스케줄러
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 기존 schedule 트리거가 신규 저장소에서 즉시 등록되지 않는 GitHub 제약을 우회.
+# 10분 간격 크론이 등록되면 → 시각 판단 후 각 스크립트 실행.
+# push 트리거 → 배포 즉시 정상 동작 확인 및 스케줄 부트스트랩.
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # 10분마다 (GitHub 스케줄 최소 단위)
+  push:
+    branches: [main]          # 배포 직후 즉시 1회 실행 → 스케줄 부트스트랩
+  workflow_dispatch:           # 수동 즉시 실행
+
+concurrency:
+  group: fm2026-scheduler
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: FM2026 스케줄 점검 및 실행
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정 (3.11)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 시각 기반 실행 여부 결정 ──────────────────────────────────────────
+      - name: 실행 대상 결정 (KST 시각 판단)
+        id: decide
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python3 << 'PYEOF'
+          import datetime, os
+
+          kst = datetime.timezone(datetime.timedelta(hours=9))
+          now = datetime.datetime.now(kst)
+          h, m, wd = now.hour, now.minute, now.isoweekday()  # wd: 1=월 … 7=일
+
+          event = os.environ.get('GITHUB_EVENT_NAME', 'schedule')
+          force = event in ('workflow_dispatch', 'push')
+
+          in_window  = force or (m < 10)          # 매시간 0~9분 창
+          pmo_time   = force or (in_window and wd <= 5 and h in (9, 17))
+          watch_time = in_window
+
+          print(f"KST {now:%Y-%m-%d %H:%M} 요일={wd} 이벤트={event}")
+          print(f"  → PMO실행={pmo_time}  감시실행={watch_time}")
+
+          gho = os.environ['GITHUB_OUTPUT']
+          with open(gho, 'a') as f:
+              f.write(f"run_pmo={'true' if pmo_time else 'false'}\n")
+              f.write(f"run_watch={'true' if watch_time else 'false'}\n")
+          PYEOF
+
+      # ── 감시 상태파일 복원 ───────────────────────────────────────────────
+      - name: 감시 상태파일 복원
+        if: steps.decide.outputs.run_watch == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            .fm2026_watch_state.json
+            .fm2026_seen_attachments.json
+          key: fm2026-watch-state-${{ github.run_id }}
+          restore-keys: |
+            fm2026-watch-state-
+
+      # ── 스마트 적응형 감시 (매시간) ─────────────────────────────────────
+      - name: 스마트 감시 실행
+        if: steps.decide.outputs.run_watch == 'true'
+        env:
+          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
+        run: python fm2026_smart_watch.py --post-comments --once
+
+      # ── 산출물 신규 등록 감시 (매시간) ──────────────────────────────────
+      - name: 산출물 감시 실행
+        if: steps.decide.outputs.run_watch == 'true'
+        env:
+          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
+        run: python fm2026_deliverable_watch.py --post-comments
+
+      # ── PMO 자동화 (평일 09:00 / 17:00 KST) ────────────────────────────
+      - name: PMO 자동화 실행
+        if: steps.decide.outputs.run_pmo == 'true'
+        env:
+          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
+        run: python fm2026_pmo_auto.py --post-comments
+
+      # ── 감시 상태파일 저장 ───────────────────────────────────────────────
+      - name: 감시 상태파일 저장
+        if: always() && steps.decide.outputs.run_watch == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .fm2026_watch_state.json
+            .fm2026_seen_attachments.json
+          key: fm2026-watch-state-${{ github.run_id }}
+
+      # ── 로그 아티팩트 저장 ───────────────────────────────────────────────
+      - name: 로그 아티팩트 저장
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm2026-scheduler-${{ github.run_id }}
+          path: |
+            fm2026_pmo_report_*.json
+            fm2026_pmo_auto.log
+            fm2026_smart_watch.log
+            fm2026_deliverable_watch.log
+          retention-days: 30
+          if-no-files-found: ignore

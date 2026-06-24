@@ -1,10 +1,7 @@
 name: FM2026 스마트 적응형 감시 (1시간 단위)
 
 on:
-  # 매시간 정각 실행 — 무변화 2회 감지 시 로직 내부에서 조기 종료
-  schedule:
-    - cron: "0 * * * *"
-
+  # 자동 스케줄은 fm2026_scheduler.yml 이 담당합니다.
   # 수동 실행 (즉시 점검 또는 초기화)
   workflow_dispatch:
     inputs:

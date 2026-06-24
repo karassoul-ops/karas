@@ -1,13 +1,7 @@
 name: FM2026 팜맵 PMO 자동화
 
 on:
-  # 매일 평일 오전 9시 / 오후 5시 (KST = UTC+9)
-  #   09:00 KST = 00:00 UTC
-  #   17:00 KST = 08:00 UTC
-  schedule:
-    - cron: "0 0 * * 1-5"   # 오전 9:00 KST
-    - cron: "0 8 * * 1-5"   # 오후 5:00 KST
-
+  # 자동 스케줄은 fm2026_scheduler.yml 이 담당합니다.
   # 수동 실행 (GitHub Actions UI → Run workflow)
   workflow_dispatch:
     inputs:

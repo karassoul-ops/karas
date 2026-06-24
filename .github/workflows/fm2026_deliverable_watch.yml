@@ -1,10 +1,7 @@
 name: FM2026 산출물 신규 등록 감시 (1시간 단위)
 
 on:
-  # 매시간 정각 실행 (업무시간 외 포함 — 산출물은 언제든 등록될 수 있음)
-  schedule:
-    - cron: "0 * * * *"
-
+  # 자동 스케줄은 fm2026_scheduler.yml 이 담당합니다.
   # 수동 실행
   workflow_dispatch:
     inputs:

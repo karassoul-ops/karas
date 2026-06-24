@@ -342,7 +342,7 @@ def run_check(state: dict, dry_run: bool, is_scheduled: bool = False) -> tuple[l
                 if not core.already_commented(issue, act.marker):
                     all_actions.append(act)
 
-            # 신규 첨부파일 → 기존 deliverable_watch 분석 댓글
+            # 신규 첨부파일 → 기본 분석 댓글 + 심층 분석 댓글
             for att in (issue["fields"].get("attachment") or []):
                 fname = att.get("filename", "")
                 if fname in ic.new_attachments:
@@ -352,6 +352,10 @@ def run_check(state: dict, dry_run: bool, is_scheduled: bool = False) -> tuple[l
                             act2 = dwatch.analyze_new_deliverable(issue, a)
                             if not core.already_commented(issue, act2.marker):
                                 all_actions.append(act2)
+                            # 팜맵 사업 특화 심층 분석 (변경 산출물)
+                            deep = dwatch.deep_analyze_deliverable(issue, a, is_change=True)
+                            if not core.already_commented(issue, deep.marker):
+                                all_actions.append(deep)
 
     # 스냅샷 갱신 (변화 감지에 쓰일 베이스라인)
     state["issue_snapshots"] = new_snapshots

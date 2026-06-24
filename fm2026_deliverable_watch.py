@@ -23,6 +23,7 @@ FM2026 산출물 신규 등록 감지 및 정밀 분석 모듈
 from __future__ import annotations
 
 import os
+import re
 import sys
 import json
 import argparse
@@ -60,6 +61,113 @@ DELIVERABLE_RULES = [
 ]
 
 
+# ─── 팜맵 사업 특화 심층 분석 규칙 ──────────────────────────────────────────
+# 형식: (check_id, 점검 항목, 근거/기준, 권고 조치)
+FARMMAP_DEEP_RULES: dict[str, list[tuple[str, str, str, str]]] = {
+    "요구사항/면담": [
+        ("F01", "면담 대상 기관·담당자 명시",
+         "RFP 제4조: 사업 착수 후 2주 이내 이해관계자 면담 계획 수립 필요",
+         "면담 대상(농림축산식품부·농정원·지자체 등) 및 담당자 목록 추가"),
+        ("F02", "면담 항목 ↔ RFP 요구사항 매핑",
+         "기술협상서 §2.1: 각 면담 항목은 RFP 기능 요구사항 ID(FR-NNN)와 연계 필요",
+         "면담 항목 옆에 대응 RFP 요구사항 ID 컬럼 추가"),
+        ("F03", "면담 일정과 WBS 정합성",
+         "사업수행계획서 일정표: 면담 일정이 WBS 분석 단계 일정 이내여야 함",
+         "WBS 기준 면담 예정일·실시일·장소를 문서에 명시"),
+        ("F04", "면담결과서·요구사항정의서 연계 명시",
+         "산출물 정의서: 면담계획서→면담결과서→요구사항정의서 순서 추적 필수",
+         "본 계획서 기반으로 생성될 하위 산출물(이슈 링크 또는 파일명) 참조 추가"),
+    ],
+    "요구사항": [
+        ("R01", "기능/비기능 요구사항 분리",
+         "ISO/IEC 25010 및 RFP 품질 기준: 기능·성능·보안·가용성 요구사항 별도 분류",
+         "요구사항 유형 컬럼(기능/비기능) 추가 및 각 항목 분류 기재"),
+        ("R02", "요구사항 ID 체계 일관성",
+         "기술협상서 §3.2: FR-NNN(기능), NFR-NNN(비기능) 형식 ID 표준 사용",
+         "전체 ID 형식을 표준에 맞게 통일 및 누락 ID 부여"),
+        ("R03", "팜맵 갱신 관련 요구사항 포함 여부",
+         "RFP 핵심 과업: 연간 팜맵 갱신(필지 경계·지목 변경·신규 농경지 반영) 요구사항 필수",
+         "팜맵 갱신 주기·방법·정확도 기준(위치 오차 ≤1m) 관련 요구사항 추가"),
+        ("R04", "활용서비스 연계 요구사항 포함 여부",
+         "RFP 핵심 과업: 농정원 내·외부 시스템 연계 및 활용서비스 관련 요구사항 필수",
+         "API 연계·데이터 제공 방식·UI 요구사항 보완"),
+    ],
+    "설계": [
+        ("D01", "팜맵 공간데이터 스키마 반영",
+         "팜맵 DB 표준: WGS84/TM 좌표계, Geometry 타입(Polygon/MultiPolygon) 명시 필요",
+         "공간 컬럼(geom) 및 좌표계(SRID=4326 또는 5179) 정의 추가"),
+        ("D02", "농정원 UI/UX 가이드라인 준수",
+         "농정원 표준 UI 가이드: 색상 코드·폰트·버튼 스타일·반응형 레이아웃 기준 준수",
+         "화면 컴포넌트 목록에 가이드라인 준수 여부 체크 컬럼 추가"),
+        ("D03", "화면 ID 표준화 (SCR-[모듈]-NNN)",
+         "기술협상서 §4.1: 화면 ID는 'SCR-[모듈코드]-NNN' 형식 사용 규정",
+         "전체 화면 목록 ID 형식을 표준으로 통일"),
+        ("D04", "인터페이스(API) 명세 명확성",
+         "RFP §5 연계 요건: 각 API 엔드포인트의 Request/Response 스펙 문서화 필요",
+         "API 명세서(Swagger/별도 문서)와 설계서 간 연계 참조 추가"),
+    ],
+    "테스트": [
+        ("T01", "단위/통합/시스템 테스트 단계 구분",
+         "품질계획서: 테스트 단계별(단위→통합→시스템→인수) 구분 및 담당자 명시 필수",
+         "테스트 케이스에 테스트 단계 컬럼 추가 및 각 케이스 분류"),
+        ("T02", "팜맵 갱신 공간 정확도 검증 포함",
+         "RFP 품질 기준: 갱신 결과물의 기하 정확도(위치 오차 ≤1m) 검증 테스트 필수",
+         "공간 정확도 검증 테스트 케이스 추가(샘플 필지 비교·검증)"),
+        ("T03", "요구사항 추적 커버리지 기준 명시",
+         "품질계획서: 기능 요구사항 대비 테스트 커버리지 80% 이상 목표",
+         "RTM(요구사항 추적표)과 테스트 케이스 매핑으로 커버리지 측정 방법 기재"),
+    ],
+    "관리/계획": [
+        ("P01", "WBS ↔ Jira Due Date 동기화",
+         "사업수행계획서: Jira 이슈 Due Date는 WBS 계획 일정과 반드시 일치해야 함",
+         "WBS 마일스톤 기준으로 Jira 전체 이슈의 Due Date 일괄 검토·갱신"),
+        ("P02", "마일스톤(착수·중간·최종 보고) 누락 여부",
+         "기술협상서 §1.2: 착수보고·중간보고·최종보고 마일스톤 명시 필수",
+         "보고 일정 마일스톤이 WBS에 표시되어 있는지 확인 후 미표시 시 추가"),
+        ("P03", "과업 변경사항 현행화",
+         "계약 변경 이력: 과업 변경 시 과업대비표·WBS·산출물 정의서 동시 현행화 필수",
+         "최근 변경 과업 내용 반영 여부 검토 후 미반영 항목 즉시 업데이트"),
+        ("P04", "팜맵 2026 추진 방향 일치",
+         "농정원 사업 방향: 팜맵 갱신 정확도 향상·활용서비스 확대·연계 기관 증가 목표 반영",
+         "본 계획서의 추진 방향이 최신 농정원 방침과 일치하는지 검토"),
+    ],
+    "운영": [
+        ("O01", "운영 조직 및 역할 정의",
+         "기술협상서 §6: 운영 조직도(개발사·농정원·지자체) 및 역할·책임 명시 필수",
+         "운영 조직도와 각 역할별 담당 업무 상세화"),
+        ("O02", "장애 대응 절차 및 RTO 명시",
+         "RFP 운영 요건: 서비스 장애 시 복구 시간 목표(RTO 4h 이내) 및 복구 절차 명시",
+         "장애 유형별(인프라·앱·DB) 대응 절차 및 에스컬레이션 경로 추가"),
+        ("O03", "백업·복구 계획 포함",
+         "팜맵 데이터 중요도: 공간 DB 일 1회 이상 백업, 복구 시험 반기 1회 이상",
+         "백업 주기·보관 기간·복구 절차·테스트 일정 명시"),
+    ],
+    "품질": [
+        ("Q01", "품질 지표 수치 목표 명시",
+         "기술협상서 §5: 결함 밀도(≤0.5건/FP), 테스트 커버리지(≥80%) 등 수치 목표 필수",
+         "품질 목표 수치 및 측정 방법 명시"),
+        ("Q02", "검토·승인 절차 및 담당자 명시",
+         "품질계획서 표준: 산출물별 검토자·승인자·검토 방법·기한 정의 필요",
+         "산출물 검토·승인 매트릭스(산출물명·검토자·승인자·기한) 추가"),
+    ],
+    "공통": [
+        ("C01", "의사결정 사항 명확히 기재",
+         "PM 관리 기준: 회의 결정 사항은 결론·담당자·기한 명시로 추적 가능해야 함",
+         "의사결정 목록에 '결론', '담당자', '완료 기한' 컬럼 추가"),
+        ("C02", "액션아이템 담당자·기한 기재",
+         "사업수행계획서: 모든 액션아이템은 담당자 및 완료 기한 필수 기재",
+         "액션아이템 목록 점검 후 미기재 항목 보완"),
+    ],
+    "일반 산출물": [
+        ("G01", "문서 목적·범위 명확성",
+         "일반 문서 작성 기준: 목적·적용 범위·용어 정의를 문서 전두에 명시",
+         "목적(Purpose)·범위(Scope)·용어(Glossary) 섹션 추가"),
+        ("G02", "관련 산출물 상호 참조",
+         "산출물 정의서: 각 산출물은 선행·후속 산출물과의 연관성 명시 필요",
+         "관련 문서 목록 추가 및 참조 관계(선행·후속·병행) 기재"),
+    ],
+}
+
 # ─── 상태 관리 ───────────────────────────────────────────────────────────────
 
 def load_seen() -> dict:
@@ -87,6 +195,176 @@ def classify_deliverable(filename: str) -> tuple[str, list[str]]:
         if keyword.replace(" ", "") in name:
             return dtype, perspectives
     return "일반 산출물", ["문서 목적·범위 명확성", "관련 산출물과의 정합성"]
+
+
+def deep_analyze_deliverable(
+    issue: dict,
+    att: dict,
+    is_change: bool = False,
+) -> core.CommentAction:
+    """
+    팜맵 사업 특화 심층 분석.
+
+    객관적 메타데이터 기준(PDF 동시등록·버전 표기·포맷) 검사 후,
+    산출물 유형별 심층 점검 항목을 근거/기준과 함께 제시합니다.
+
+    - 객관적 결함(critical) 없음 → '즉각 개선 필요 없음' 알림 + 권고 체크리스트
+    - 객관적 결함 있음          → 우선 개선 항목 + 근거 상세 제시
+    """
+    key     = issue["key"]
+    summary = issue["fields"].get("summary", "")
+    fname   = att["filename"]
+    ext_raw = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+    ext     = f".{ext_raw}"
+    author  = att.get("author", "")
+    created = att.get("created", "")
+    size_kb = att.get("size", 0) // 1024
+
+    dtype, _ = classify_deliverable(fname)
+
+    # ── 객관적 메타데이터 검사 ──────────────────────────────────────────────
+    all_atts = issue["fields"].get("attachment") or []
+    pdf_stems = {
+        (a.get("filename", "").rsplit(".", 1)[0] if "." in a.get("filename", "") else a.get("filename", ""))
+        for a in all_atts if a.get("filename", "").lower().endswith(".pdf")
+    }
+    my_stem = fname.rsplit(".", 1)[0] if "." in fname else fname
+    has_pdf     = (ext == ".pdf") or (my_stem in pdf_stems)
+    has_version = bool(re.search(r'[_\-\s]?v\d+[\.\d]*', fname, re.IGNORECASE)
+                       or re.search(r'_\d+(\.\d+)+', fname))
+
+    critical: list[tuple[str, str, str]] = []  # (항목, 근거, 권고)
+    if not has_pdf:
+        critical.append((
+            "원본 + PDF 동시 등록 필요",
+            "PMO 관리 방침: 편집 가능 원본(hwp/docx/xlsx 등) + PDF 동시 등록 필수 — "
+            "검토자가 전용 뷰어 없이 열람 가능하도록 PDF 제공",
+            f"파일명 '{my_stem}.pdf'를 원본과 함께 이슈에 첨부"))
+    if not has_version:
+        critical.append((
+            "버전 표기 누락 의심",
+            "문서 관리 기준: 모든 산출물은 버전(v1.0 등)과 작성일 필수 기재 — "
+            "이력 추적 및 최신본 식별을 위해 필요",
+            f"파일명에 버전 추가 (예: {my_stem}_v1.0.{ext_raw})"))
+
+    # ── 유형별 심층 체크리스트 ─────────────────────────────────────────────
+    type_rules = FARMMAP_DEEP_RULES.get(dtype, FARMMAP_DEEP_RULES["일반 산출물"])
+
+    # ── 결과 판정 ──────────────────────────────────────────────────────────
+    no_critical = len(critical) == 0
+    context_label = "변경 산출물" if is_change else "신규 산출물"
+    check_time = core.TS()
+
+    if no_critical:
+        # ── 즉각 개선 불필요 알림 + 권고 체크리스트 ─────────────────────
+        rationale = (
+            f"[{key}] '{fname}' 메타데이터 검사 통과 — "
+            f"PDF 동시등록: {'예' if has_pdf else '아니오'}, 버전 표기: {'예' if has_version else '아니오'}.\n"
+            f"유형별 심층 점검 항목을 권고 체크리스트로 제시."
+        )
+        checklist_lines = "\n".join(
+            f"| {cid} | {item} | {rat} | {sug} |"
+            for cid, item, rat, sug in type_rules
+        )
+        body = f"""## ✅ [PMO 심층분석 | {context_label}] 개선할 사항이 없습니다
+
+**이슈**: [{key}]({core.issue_url(key)})
+**제목**: {summary}
+**산출물**: `{fname}`  ({size_kb}KB)  |  **등록자**: {author}  |  **등록일**: {created}
+**유형**: {dtype}  |  **PDF 동시등록**: ✓  |  **버전 표기**: {'✓' if has_version else '미확인'}
+
+---
+
+### 🎉 사업담당자 알림 — 즉각 개선 필요 항목 없음
+
+메타데이터 기준 검사(PDF 동시등록·버전 표기·파일 형식) 결과
+현재 즉각 보완이 필요한 사항이 감지되지 않았습니다.
+
+> 단, 문서 **내용**까지 자동 검사는 불가합니다.
+> 아래 유형별 권고 체크리스트를 참고하여 내용을 최종 확인해 주세요.
+
+---
+
+### 📋 [{dtype}] 유형별 내용 검토 권고 체크리스트
+
+| ID | 점검 항목 | 근거/기준 | 권고 조치 |
+|----|----------|----------|---------|
+{checklist_lines}
+| COM03 | 팜맵 2026 추진 방향 반영 | 사업 개요: 팜맵 갱신 정확도 향상·활용서비스 운영·개선이 핵심 목표 | 본 산출물이 팜맵 갱신·활용서비스 목표와 연계되어 있는지 최종 확인 |
+
+> 검토 완료 후 본 댓글에 '내용 확인 완료' 답글을 남겨주세요.
+
+*자동 생성: FM2026 PMO 심층분석 | {check_time}*"""
+
+        return core.CommentAction(
+            issue_key=key, summary=summary,
+            action_type="deep_analysis_ok",
+            title=f"심층분석 — 즉각 개선 불필요: {fname}",
+            rationale=rationale,
+            comment_body=body,
+            priority="낮음",
+            marker=f"PMO 심층분석 | {context_label}] 개선할 사항이 없습니다",
+        )
+
+    # ── 개선 필요 항목 존재 → 상세 개선 댓글 ────────────────────────────────
+    critical_lines = "\n".join(
+        f"| 🔴 **{item}** | {rat} | **{sug}** |"
+        for item, rat, sug in critical
+    )
+    checklist_lines = "\n".join(
+        f"| {cid} | {item} | {rat} | {sug} |"
+        for cid, item, rat, sug in type_rules
+    )
+    rationale = (
+        f"[{key}] '{fname}' 메타데이터 검사 — "
+        f"PDF: {'있음' if has_pdf else '없음'}, 버전 표기: {'있음' if has_version else '없음'}.\n"
+        f"우선 개선 항목 {len(critical)}건 감지됨."
+    )
+    body = f"""## 🔧 [PMO 심층분석 | {context_label}] 팜맵 사업 특화 개선 사항 제시
+
+**이슈**: [{key}]({core.issue_url(key)})
+**제목**: {summary}
+**산출물**: `{fname}`  ({size_kb}KB)  |  **등록자**: {author}  |  **등록일**: {created}
+**유형**: {dtype}
+
+---
+
+### 🚨 우선 개선 필요 항목 ({len(critical)}건)
+
+| 개선 항목 | 근거/기준 | 권고 조치 |
+|----------|----------|---------|
+{critical_lines}
+
+---
+
+### 📋 [{dtype}] 유형별 심층 점검 체크리스트
+
+아래 항목을 검토하여 팜맵 사업 기준에 적합하도록 보완·수정해 주세요.
+
+| ID | 점검 항목 | 근거/기준 | 권고 조치 |
+|----|----------|----------|---------|
+{checklist_lines}
+| COM03 | 팜맵 2026 추진 방향 반영 | 사업 개요: 팜맵 갱신 정확도 향상·활용서비스 운영·개선이 핵심 목표 | 본 산출물이 팜맵 갱신·활용서비스 목표와 연계되어 있는지 검토 |
+
+### ✅ 등록 기준 재확인
+- [ ] 버전(v1.0 등) 및 작성일 파일명 또는 문서 내 기재
+- [ ] 원본 파일 + PDF 동시 등록
+- [ ] 검토자·승인자 서명란 포함(해당 시)
+- [ ] WBS·과업대비표·산출물 정의서와 정합성 확인
+
+> 보완 완료 후 본 댓글에 '개선 완료' 답글과 함께 수정본을 재등록해 주세요.
+
+*자동 생성: FM2026 PMO 심층분석 | {check_time}*"""
+
+    return core.CommentAction(
+        issue_key=key, summary=summary,
+        action_type="deep_analysis_improvement",
+        title=f"심층분석 — 개선 필요({len(critical)}건): {fname}",
+        rationale=rationale,
+        comment_body=body,
+        priority="높음" if len(critical) >= 2 else "보통",
+        marker=f"PMO 심층분석 | {context_label}] 팜맵 사업 특화 개선 사항 제시",
+    )
 
 
 def analyze_new_deliverable(issue: dict, att: dict) -> core.CommentAction:
@@ -207,8 +485,11 @@ def watch_deliverables(
             # 신규 산출물 발견
             action = analyze_new_deliverable(issue, att)
             if not core.already_commented(issue, action.marker + f" {att['filename']}"):
-                # 동일 파일에 대한 분석 댓글이 이미 없으면 추가
                 new_actions.append(action)
+            # 심층 분석 댓글 (신규 산출물)
+            deep = deep_analyze_deliverable(issue, att, is_change=False)
+            if not core.already_commented(issue, deep.marker):
+                new_actions.append(deep)
             summary_log.append({
                 "issue": issue["key"],
                 "file": att["filename"],

@@ -38,53 +38,20 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: 의존성 설치 (표준 라이브러리만 사용, 추가 패키지 없음)
-        run: echo "표준 라이브러리 사용으로 설치 불필요"
-
-      - name: PMO 자동화 실행 (수동 실행 - review 모드)
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'review'
+      - name: PMO 자동화 실행
         env:
           JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
         run: |
-          ARGS="--review"
+          case "${{ github.event.inputs.mode }}" in
+            review)        ARGS="--review" ;;
+            post-comments) ARGS="--post-comments" ;;
+            *)             ARGS="" ;;
+          esac
           [ -n "${{ github.event.inputs.issue_key }}" ] && ARGS="$ARGS --issue ${{ github.event.inputs.issue_key }}"
           [ -n "${{ github.event.inputs.since_date }}" ] && ARGS="$ARGS --since ${{ github.event.inputs.since_date }}"
           python fm2026_pmo_auto.py $ARGS
-
-      - name: PMO 자동화 실행 (수동 실행 - dry-run 모드)
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'dry-run'
-        env:
-          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
-        run: |
-          ARGS=""
-          [ -n "${{ github.event.inputs.issue_key }}" ] && ARGS="$ARGS --issue ${{ github.event.inputs.issue_key }}"
-          [ -n "${{ github.event.inputs.since_date }}" ] && ARGS="$ARGS --since ${{ github.event.inputs.since_date }}"
-          python fm2026_pmo_auto.py $ARGS
-
-      - name: PMO 자동화 실행 (수동 실행 - 댓글 등록 모드)
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'post-comments'
-        env:
-          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
-        run: |
-          ARGS="--post-comments"
-          [ -n "${{ github.event.inputs.issue_key }}" ] && ARGS="$ARGS --issue ${{ github.event.inputs.issue_key }}"
-          [ -n "${{ github.event.inputs.since_date }}" ] && ARGS="$ARGS --since ${{ github.event.inputs.since_date }}"
-          python fm2026_pmo_auto.py $ARGS
-
-      - name: PMO 자동화 실행 (스케줄 - 자동 댓글 등록)
-        if: github.event_name == 'schedule'
-        env:
-          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
-        run: |
-          python fm2026_pmo_auto.py --post-comments
 
       - name: 리포트 파일 아티팩트 저장
         if: always()
@@ -95,3 +62,4 @@ jobs:
             fm2026_pmo_report_*.json
             fm2026_pmo_auto.log
           retention-days: 30
+          if-no-files-found: ignore

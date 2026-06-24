@@ -25,8 +25,7 @@ FM2026 스마트 적응형 감시 시스템 (Smart Adaptive Watch)
   - 산출물 정의서, WBS, 과업대비표, 사업수행계획서 (변경 시 즉시 현행화 알림)
 
 사용법:
-  python fm2026_smart_watch.py                 # 스마트 감시 시작 (권장)
-  python fm2026_smart_watch.py --once          # 1회 점검 후 종료
+  python fm2026_smart_watch.py                 # 1회 점검 (dry-run)
   python fm2026_smart_watch.py --post-comments # 실제 댓글 등록 모드
   python fm2026_smart_watch.py --review        # 결과 미리보기 (댓글 미등록)
   python fm2026_smart_watch.py --reset         # 감시 상태 전체 초기화
@@ -37,7 +36,6 @@ from __future__ import annotations
 import os
 import sys
 import json
-import time
 import argparse
 import logging
 from datetime import datetime, timezone, timedelta
@@ -52,10 +50,8 @@ log  = logging.getLogger("smart_watch")
 # ─── 상태 파일 ───────────────────────────────────────────────────────────────
 WATCH_STATE_FILE = ".fm2026_watch_state.json"
 
-# 무변화 허용 횟수: 이 값 초과 시 실시간 감시 일시 중지
-MAX_IDLE_COUNT = 2        # 2회 연속 무변화 → 대기
-HOURLY_INTERVAL = 60      # 실시간 점검 간격 (분)
-SCHEDULED_TIMES = [("09", "00"), ("17", "00")]   # 정기 점검 시각 (KST)
+# 무변화 허용 횟수: 이 값 초과 시 감시 중지 플래그
+MAX_IDLE_COUNT = 2
 
 # ─── 필수 확인 산출물 목록 (변경 감지 시 강조 알림) ─────────────────────────
 MANDATORY_DELIVERABLES = [
@@ -189,8 +185,7 @@ def print_change_report(
     if not changed:
         print(f"\n  ✅ 변화 없음  (연속 무변화: {idle_count}회/{MAX_IDLE_COUNT}회)")
         if not watching:
-            nxt = _next_scheduled(check_time)
-            print(f"  💤 실시간 감시 일시 중지 → 다음 정기 점검: {nxt.strftime('%Y-%m-%d %H:%M KST')}")
+            print(f"  💤 연속 {MAX_IDLE_COUNT}회 무변화 — 다음 정기 스케줄에서 재개")
         print()
         return
 
@@ -210,7 +205,6 @@ def print_change_report(
         for ic in normal_issues:
             _print_issue_change(ic, urgent=False)
 
-    print(f"\n  다음 실시간 점검: {(check_time + timedelta(hours=1)).strftime('%H:%M KST')}")
     print()
 
 
@@ -276,38 +270,14 @@ def make_mandatory_check_comment(ic: IssueChange, fname: str) -> core.CommentAct
     )
 
 
-# ─── 정기 시각 계산 ──────────────────────────────────────────────────────────
-
-def _next_scheduled(now: datetime) -> datetime:
-    """다음 정기 점검 시각(09:00 또는 17:00) 계산"""
-    candidates = []
-    for hh, mm in SCHEDULED_TIMES:
-        t = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-        if t <= now:
-            t += timedelta(days=1)
-        candidates.append(t)
-    return min(candidates)
-
-
-def _is_scheduled_time(now: datetime) -> bool:
-    """현재 시각이 정기 점검 시각이면 True
-    조건: 해당 시각의 [0분, +2분] 범위 (이전 시각은 포함하지 않음)"""
-    for hh, mm in SCHEDULED_TIMES:
-        target = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-        diff = (now - target).total_seconds()
-        if 0 <= diff <= 120:   # 정각 이후 0~2분 사이
-            return True
-    return False
-
-
 # ─── 단일 점검 실행 ──────────────────────────────────────────────────────────
 
-def run_check(state: dict, dry_run: bool, is_scheduled: bool = False) -> tuple[list[IssueChange], bool]:
+def run_check(state: dict, dry_run: bool) -> tuple[list[IssueChange], bool]:
     """
     단일 점검 실행.
     returns: (변경된 이슈 목록, 변화 있었는지 여부)
     """
-    log.info("점검 시작 (정기 시각: %s)", "예" if is_scheduled else "아니오")
+    log.info("점검 시작")
     state["total_checks"] = state.get("total_checks", 0) + 1
 
     # 이슈 조회
@@ -336,13 +306,11 @@ def run_check(state: dict, dry_run: bool, is_scheduled: bool = False) -> tuple[l
             changed.append(ic)
             state["total_changes"] = state.get("total_changes", 0) + 1
 
-            # 필수 확인 산출물 → 긴급 댓글
             for fname in ic.mandatory_hit:
                 act = make_mandatory_check_comment(ic, fname)
                 if not core.already_commented(issue, act.marker):
                     all_actions.append(act)
 
-            # 신규 첨부파일 → 기본 분석 댓글 + 심층 분석 댓글
             for att in (issue["fields"].get("attachment") or []):
                 fname = att.get("filename", "")
                 if fname in ic.new_attachments:
@@ -352,7 +320,6 @@ def run_check(state: dict, dry_run: bool, is_scheduled: bool = False) -> tuple[l
                             act2 = dwatch.analyze_new_deliverable(issue, a)
                             if not core.already_commented(issue, act2.marker):
                                 all_actions.append(act2)
-                            # 팜맵 사업 특화 심층 분석 (변경 산출물)
                             deep = dwatch.deep_analyze_deliverable(issue, a, is_change=True)
                             if not core.already_commented(issue, deep.marker):
                                 all_actions.append(deep)
@@ -380,124 +347,27 @@ def run_check(state: dict, dry_run: bool, is_scheduled: bool = False) -> tuple[l
     return changed, has_change
 
 
-# ─── 스마트 감시 메인 루프 ───────────────────────────────────────────────────
+# ─── 스마트 감시 (1회 실행) ─────────────────────────────────────────────────
 
-def run_smart_watch(dry_run: bool, once: bool, reset: bool) -> None:
+def run_smart_watch(dry_run: bool, reset: bool) -> None:
     if reset:
         for f in (WATCH_STATE_FILE, dwatch.STATE_FILE):
             if os.path.exists(f):
                 os.remove(f)
         log.info("감시 상태 초기화 완료")
 
-    state   = _load_watch_state()
-    now     = datetime.now(KST)
+    state = _load_watch_state()
+    now   = datetime.now(KST)
 
-    # ── 1회 점검 모드 ──────────────────────────────────────────────────────
-    if once:
-        is_sched = _is_scheduled_time(now)
-        if is_sched:
-            log.info("▶ 정기 시각 점검 (전체 PMO 포함)")
-            _run_pmo_full(dry_run)
-            state["idle_count"] = 0
-            state["watching"]   = True
+    changed, has_change = run_check(state, dry_run)
+    if has_change:
+        state["idle_count"] = 0
+    else:
+        state["idle_count"] = state.get("idle_count", 0) + 1
 
-        changed, has_change = run_check(state, dry_run, is_sched)
-        if not has_change:
-            state["idle_count"] = state.get("idle_count", 0) + 1
-        else:
-            state["idle_count"] = 0
-
-        state["watching"] = state["idle_count"] < MAX_IDLE_COUNT
-        _save_watch_state(state)
-        print_change_report(changed, now, state["idle_count"], state["watching"])
-        return
-
-    # ── 연속 루프 모드 ─────────────────────────────────────────────────────
-    _print_watch_banner(dry_run)
-
-    while True:
-        now         = datetime.now(KST)
-        is_sched    = _is_scheduled_time(now)
-        idle_count  = state.get("idle_count", 0)
-        watching    = state.get("watching", True)
-
-        # ── 정기 시각 도달 → 무조건 전체 점검 + 실시간 재개 ──────────────
-        if is_sched:
-            log.info("━━ 정기 시각 점검 (%s) — 실시간 감시 재개 ━━",
-                     now.strftime("%H:%M"))
-            _run_pmo_full(dry_run)
-            state["idle_count"] = 0
-            state["watching"]   = True
-            changed, has_change = run_check(state, dry_run, is_sched=True)
-            print_change_report(changed, now, 0, True)
-            _save_watch_state(state)
-            time.sleep(HOURLY_INTERVAL * 60)
-            continue
-
-        # ── 대기 상태: 다음 정기 시각까지 슬립 ───────────────────────────
-        if not watching:
-            nxt  = _next_scheduled(now)
-            secs = (nxt - now).total_seconds()
-            log.info("💤 대기 중 — 다음 정기 점검: %s (%.0f분 후)",
-                     nxt.strftime("%Y-%m-%d %H:%M KST"), secs / 60)
-            try:
-                time.sleep(secs)
-            except KeyboardInterrupt:
-                print("\n감시 종료")
-                break
-            continue
-
-        # ── 실시간 감시 활성: 1시간 간격 점검 ────────────────────────────
-        changed, has_change = run_check(state, dry_run, is_sched=False)
-
-        if has_change:
-            state["idle_count"] = 0
-        else:
-            state["idle_count"] = idle_count + 1
-
-        # 연속 무변화 MAX_IDLE_COUNT 초과 → 일시 중지
-        if state["idle_count"] >= MAX_IDLE_COUNT:
-            state["watching"] = False
-            nxt = _next_scheduled(now)
-            log.info("🔕 %d시간 연속 무변화 → 실시간 감시 일시 중지 (재개: %s)",
-                     MAX_IDLE_COUNT, nxt.strftime("%Y-%m-%d %H:%M KST"))
-        else:
-            state["watching"] = True
-
-        print_change_report(changed, now, state["idle_count"], state["watching"])
-        _save_watch_state(state)
-
-        if not state["watching"]:
-            continue   # 대기 처리는 루프 상단에서
-
-        try:
-            time.sleep(HOURLY_INTERVAL * 60)
-        except KeyboardInterrupt:
-            print("\n감시 종료")
-            break
-
-
-def _run_pmo_full(dry_run: bool) -> None:
-    """전체 PMO 자동화 실행 (기존 fm2026_pmo_auto 호출)"""
-    import subprocess
-    cmd = [sys.executable, "fm2026_pmo_auto.py"]
-    if not dry_run:
-        cmd.append("--post-comments")
-    log.info("전체 PMO 점검 실행: %s", " ".join(cmd))
-    subprocess.run(cmd)
-
-
-def _print_watch_banner(dry_run: bool) -> None:
-    mode = "DRY-RUN" if dry_run else "LIVE"
-    print("╔" + "═" * 70 + "╗")
-    print("║  FM2026 스마트 적응형 감시 시스템                                  ║")
-    print(f"║  모드: {mode:<10}  점검 간격: 1시간  정기시각: 09:00, 17:00 (KST)  ║")
-    print("╠" + "═" * 70 + "╣")
-    print("║  ▶ 변화 있음  → 1시간마다 실시간 점검 유지                         ║")
-    print("║  ▶ 2시간 무변화 → 대기, 다음 정기 시각(09:00/17:00)에 자동 재개    ║")
-    print("║  ▶ 정기 시각  → 전체 PMO 점검 + 실시간 감시 무조건 재개            ║")
-    print("║  종료: Ctrl+C                                                       ║")
-    print("╚" + "═" * 70 + "╝\n")
+    state["watching"] = state["idle_count"] < MAX_IDLE_COUNT
+    _save_watch_state(state)
+    print_change_report(changed, now, state["idle_count"], state["watching"])
 
 
 # ─── 시뮬레이션 데이터 ───────────────────────────────────────────────────────
@@ -568,8 +438,6 @@ def main() -> None:
                         help="실제 Jira 댓글 등록")
     parser.add_argument("--review",        action="store_true",
                         help="미리보기 (댓글 미등록, 결과만 출력)")
-    parser.add_argument("--once",          action="store_true",
-                        help="1회 점검 후 종료")
     parser.add_argument("--reset",         action="store_true",
                         help="감시 상태 전체 초기화")
     args = parser.parse_args()
@@ -581,7 +449,7 @@ def main() -> None:
     else:
         log.info("=== DRY-RUN 모드 (기본) — 댓글 미등록 ===")
 
-    run_smart_watch(dry_run=dry_run, once=args.once, reset=args.reset)
+    run_smart_watch(dry_run=dry_run, reset=args.reset)
 
 
 if __name__ == "__main__":

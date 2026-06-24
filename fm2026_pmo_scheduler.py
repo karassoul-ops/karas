@@ -91,7 +91,27 @@ def main() -> None:
                         help="--daily 실행 시각 목록 (기본: 09:00 17:00)")
     parser.add_argument("--watch",         action="store_true",
                         help="1시간 단위 신규 산출물 감시·분석 모드")
+    parser.add_argument("--smart",         action="store_true",
+                        help="스마트 적응형 감시 (변화 없으면 자동 대기, 권장)")
     args = parser.parse_args()
+
+    # ── 스마트 적응형 감시 모드 (권장) ────────────────────────────────────
+    if args.smart:
+        print("=" * 60)
+        print("  FM2026 스마트 적응형 감시 모드")
+        print(f"  실행 모드 : {'LIVE' if args.post_comments else 'DRY-RUN'}")
+        print("  변화 있으면 1시간 단위 실시간 점검")
+        print("  2시간 무변화 → 대기, 09:00/17:00 정기 점검 시 재개")
+        print("=" * 60)
+        cmd = [sys.executable, "fm2026_smart_watch.py"]
+        if args.post_comments:
+            cmd.append("--post-comments")
+        if args.review:
+            cmd.append("--review")
+        if args.once:
+            cmd.append("--once")
+        subprocess.run(cmd)
+        return
 
     # ── 산출물 감시 모드 (1시간 단위) ─────────────────────────────────────
     if args.watch:

@@ -1,0 +1,9 @@
+# PMO 자동화 로그 및 리포트
+*.log
+fm2026_pmo_report_*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env

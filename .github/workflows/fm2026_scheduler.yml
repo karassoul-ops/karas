@@ -6,7 +6,6 @@ name: FM2026 통합 자동 스케줄러
 #   09:00 KST = 00:00 UTC
 #   13:30 KST = 04:30 UTC
 #   17:00 KST = 08:00 UTC
-# GitHub 지연 최대 수십분 감안 → 시간대(hour) 판단으로 유연하게 처리
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   schedule:
@@ -16,6 +15,27 @@ on:
   push:
     branches: [main]          # 배포 직후 1회 실행 → 스케줄 부트스트랩
   workflow_dispatch:           # 수동 즉시 실행
+    inputs:
+      mode:
+        description: "실행 모드"
+        required: true
+        default: "full"
+        type: choice
+        options:
+          - full          # 전체 실행 (PMO + 감시 + 산출물 분석)
+          - pmo-only      # PMO 댓글만
+          - watch-only    # 감시(스마트+산출물)만
+          - gap-all       # 모든 이슈 갭분석 (산출물 변동 없어도)
+          - dry-run       # 미리보기 (댓글 미등록)
+      reset_state:
+        description: "상태파일 초기화 (전체 재분석)"
+        required: false
+        default: false
+        type: boolean
+      issue_key:
+        description: "특정 이슈만 처리 (예: FM2026-153, 비워두면 전체)"
+        required: false
+        default: ""
 
 concurrency:
   group: fm2026-scheduler
@@ -23,9 +43,9 @@ concurrency:
 
 jobs:
   run:
-    name: FM2026 스케줄 점검 및 실행
+    name: FM2026 통합 자동화 실행
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
 
     steps:
       - name: 저장소 체크아웃
@@ -41,34 +61,60 @@ jobs:
         id: decide
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
+          INPUT_MODE: ${{ github.event.inputs.mode }}
         run: |
           python3 << 'PYEOF'
           import datetime, os
 
-          kst = datetime.timezone(datetime.timedelta(hours=9))
-          now = datetime.datetime.now(kst)
-          h, m, wd = now.hour, now.minute, now.isoweekday()  # wd: 1=월 … 7=일
+          kst  = datetime.timezone(datetime.timedelta(hours=9))
+          now  = datetime.datetime.now(kst)
+          h, m, wd = now.hour, now.minute, now.isoweekday()
 
-          event = os.environ.get('GITHUB_EVENT_NAME', 'schedule')
-          force = event in ('workflow_dispatch', 'push')
+          event     = os.environ.get('GITHUB_EVENT_NAME', 'schedule')
+          inp_mode  = os.environ.get('INPUT_MODE', '')
+          force     = event in ('workflow_dispatch', 'push')
 
-          # 감시는 매 실행마다 항상 동작
-          watch_time = True
-          # PMO 댓글: 평일 09:xx / 13:xx / 17:xx 시간대 (GitHub 지연 감안 분 무관)
-          pmo_time   = force or (wd <= 5 and h in (9, 13, 17))
+          # 수동 실행 모드 처리
+          if inp_mode in ('dry-run',):
+              run_pmo   = False
+              run_watch = False
+              run_dry   = True
+              run_gap   = False
+          elif inp_mode == 'pmo-only':
+              run_pmo   = True
+              run_watch = False
+              run_dry   = False
+              run_gap   = False
+          elif inp_mode == 'watch-only':
+              run_pmo   = False
+              run_watch = True
+              run_dry   = False
+              run_gap   = False
+          elif inp_mode == 'gap-all':
+              run_pmo   = False
+              run_watch = True
+              run_dry   = False
+              run_gap   = True
+          else:
+              # full 또는 스케줄/push 실행
+              run_watch = True
+              run_pmo   = force or (wd <= 5 and h in (9, 13, 17))
+              run_dry   = False
+              run_gap   = False
 
-          print(f"KST {now:%Y-%m-%d %H:%M} 요일={wd} 이벤트={event}")
-          print(f"  → PMO실행={pmo_time}  감시실행={watch_time}")
+          print(f"KST {now:%Y-%m-%d %H:%M} 요일={wd} 이벤트={event} 모드={inp_mode or 'auto'}")
+          print(f"  → PMO={run_pmo}  감시={run_watch}  갭분석={run_gap}  dry={run_dry}")
 
           gho = os.environ['GITHUB_OUTPUT']
           with open(gho, 'a') as f:
-              f.write(f"run_pmo={'true' if pmo_time else 'false'}\n")
-              f.write(f"run_watch={'true' if watch_time else 'false'}\n")
+              f.write(f"run_pmo={'true' if run_pmo else 'false'}\n")
+              f.write(f"run_watch={'true' if run_watch else 'false'}\n")
+              f.write(f"run_gap={'true' if run_gap else 'false'}\n")
+              f.write(f"run_dry={'true' if run_dry else 'false'}\n")
           PYEOF
 
       # ── 감시 상태파일 복원 ───────────────────────────────────────────────
       - name: 감시 상태파일 복원
-        if: steps.decide.outputs.run_watch == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -78,32 +124,55 @@ jobs:
           restore-keys: |
             fm2026-watch-state-
 
-      # ── 스마트 적응형 감시 (매시간) ─────────────────────────────────────
+      # ── 스마트 적응형 감시 ───────────────────────────────────────────────
       - name: 스마트 감시 실행
         if: steps.decide.outputs.run_watch == 'true'
         env:
           JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
-        run: python fm2026_smart_watch.py --post-comments
+        run: |
+          ARGS="--post-comments"
+          [ "${{ github.event.inputs.reset_state }}" = "true" ] && ARGS="$ARGS --reset"
+          [ -n "${{ github.event.inputs.issue_key }}" ] && ARGS="$ARGS --issue ${{ github.event.inputs.issue_key }}"
+          python fm2026_smart_watch.py $ARGS
 
-      # ── 산출물 신규 등록 감시 (매시간) ──────────────────────────────────
-      - name: 산출물 감시 실행
+      # ── 산출물 신규·갱신 감지 + 주요산출물 기준 갭분석 댓글 ─────────────
+      - name: 산출물 감시 및 정밀분석 실행
         if: steps.decide.outputs.run_watch == 'true'
         env:
           JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
-        run: python fm2026_deliverable_watch.py --post-comments
+        run: |
+          ARGS="--post-comments"
+          [ "${{ github.event.inputs.reset_state }}" = "true" ] && ARGS="$ARGS --reset"
+          [ "${{ steps.decide.outputs.run_gap }}" = "true" ]    && ARGS="$ARGS --gap-all"
+          [ -n "${{ github.event.inputs.issue_key }}" ] && ARGS="$ARGS --issue ${{ github.event.inputs.issue_key }}"
+          python fm2026_deliverable_watch.py $ARGS
 
-      # ── PMO 자동화 (평일 09:00 / 17:00 KST) ────────────────────────────
+      # ── dry-run 미리보기 ────────────────────────────────────────────────
+      - name: 산출물 감시 dry-run 미리보기
+        if: steps.decide.outputs.run_dry == 'true'
+        env:
+          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
+        run: |
+          python fm2026_deliverable_watch.py --review
+          python fm2026_pmo_auto.py --review
+
+      # ── PMO 자동화 (평일 09:00 / 13:30 / 17:00 KST) ────────────────────
       - name: 사업 현황 대시보드 출력
         if: steps.decide.outputs.run_pmo == 'true'
         env:
           JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
-        run: python fm2026_pmo_auto.py --dashboard
+        run: |
+          ARGS="--dashboard"
+          [ -n "${{ github.event.inputs.issue_key }}" ] && ARGS="$ARGS --issue ${{ github.event.inputs.issue_key }}"
+          python fm2026_pmo_auto.py $ARGS
 
       - name: PMO 자동화 실행 (댓글 등록)
         if: steps.decide.outputs.run_pmo == 'true'
@@ -111,11 +180,14 @@ jobs:
           JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_SITE:      ${{ secrets.JIRA_SITE || 'optai.atlassian.net' }}
-        run: python fm2026_pmo_auto.py --post-comments
+        run: |
+          ARGS="--post-comments"
+          [ -n "${{ github.event.inputs.issue_key }}" ] && ARGS="$ARGS --issue ${{ github.event.inputs.issue_key }}"
+          python fm2026_pmo_auto.py $ARGS
 
       # ── 감시 상태파일 저장 ───────────────────────────────────────────────
       - name: 감시 상태파일 저장
-        if: always() && steps.decide.outputs.run_watch == 'true'
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: |

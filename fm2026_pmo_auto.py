@@ -276,13 +276,26 @@ def extract_text_from_adf(node: dict | None) -> str:
     return text
 
 
-def already_commented(issue: dict, marker: str) -> bool:
-    """동일 유형의 댓글이 이미 존재하는지 확인 (중복 방지)"""
+def already_commented(issue: dict, marker: str, today_only: bool = True) -> bool:
+    """동일 유형의 댓글이 이미 존재하는지 확인 (중복 방지)
+    today_only=True: 오늘 날짜 댓글만 중복으로 간주 (날짜가 바뀌면 재알림)
+    """
     comments = (issue["fields"].get("comment") or {}).get("comments", [])
+    today_str = now_kst().strftime("%Y-%m-%d")
     for c in comments:
         body = c.get("body", "")
-        body_text = extract_text_from_adf(body) if isinstance(body, dict) else str(body)
-        if marker in body_text:
+        # ADF dict 또는 plain text 모두 처리
+        if isinstance(body, dict):
+            body_text = extract_text_from_adf(body)
+        else:
+            body_text = str(body)
+        if marker not in body_text:
+            continue
+        if not today_only:
+            return True
+        # 오늘 날짜 댓글인지 확인 (created 또는 body 내 날짜)
+        created = c.get("created", "")[:10]  # "2026-06-25"
+        if created == today_str:
             return True
     return False
 

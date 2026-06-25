@@ -1,15 +1,20 @@
 name: FM2026 통합 자동 스케줄러
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 기존 schedule 트리거가 신규 저장소에서 즉시 등록되지 않는 GitHub 제약을 우회.
-# 10분 간격 크론이 등록되면 → 시각 판단 후 각 스크립트 실행.
-# push 트리거 → 배포 즉시 정상 동작 확인 및 스케줄 부트스트랩.
+# KST 09:00 / 13:30 / 17:00 (평일) 실행
+# GitHub cron은 UTC 기준 → KST = UTC+9
+#   09:00 KST = 00:00 UTC
+#   13:30 KST = 04:30 UTC
+#   17:00 KST = 08:00 UTC
+# GitHub 지연 최대 수십분 감안 → 시간대(hour) 판단으로 유연하게 처리
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   schedule:
-    - cron: "*/10 * * * *"   # 10분마다 (GitHub 스케줄 최소 단위)
+    - cron: "0 0 * * 1-5"    # 평일 09:00 KST (UTC 00:00)
+    - cron: "30 4 * * 1-5"   # 평일 13:30 KST (UTC 04:30)
+    - cron: "0 8 * * 1-5"    # 평일 17:00 KST (UTC 08:00)
   push:
-    branches: [main]          # 배포 직후 즉시 1회 실행 → 스케줄 부트스트랩
+    branches: [main]          # 배포 직후 1회 실행 → 스케줄 부트스트랩
   workflow_dispatch:           # 수동 즉시 실행
 
 concurrency:
@@ -47,10 +52,10 @@ jobs:
           event = os.environ.get('GITHUB_EVENT_NAME', 'schedule')
           force = event in ('workflow_dispatch', 'push')
 
-          # 감시는 매 실행마다 (GitHub 지연 실행에도 항상 동작)
+          # 감시는 매 실행마다 항상 동작
           watch_time = True
-          # PMO는 평일 09:xx / 17:xx 시간대에만 (분 무관 — GitHub 지연 대응)
-          pmo_time   = force or (wd <= 5 and h in (9, 17))
+          # PMO 댓글: 평일 09:xx / 13:xx / 17:xx 시간대 (GitHub 지연 감안 분 무관)
+          pmo_time   = force or (wd <= 5 and h in (9, 13, 17))
 
           print(f"KST {now:%Y-%m-%d %H:%M} 요일={wd} 이벤트={event}")
           print(f"  → PMO실행={pmo_time}  감시실행={watch_time}")

@@ -8,13 +8,14 @@ name: FM2026 통합 자동 스케줄러
 #   17:00 KST = 08:00 UTC
 # ─────────────────────────────────────────────────────────────────────────────
 on:
-  schedule:
-    - cron: "0 0 * * 1-5"    # 평일 09:00 KST (UTC 00:00)
-    - cron: "30 4 * * 1-5"   # 평일 13:30 KST (UTC 04:30)
-    - cron: "0 8 * * 1-5"    # 평일 17:00 KST (UTC 08:00)
-  push:
-    branches: [main]          # 배포 직후 1회 실행 → 스케줄 부트스트랩
-  workflow_dispatch:           # 수동 즉시 실행
+  # 자동 스케줄 중지 (2026-06-25) — 재개 시 아래 주석 해제
+  # schedule:
+  #   - cron: "0 0 * * 1-5"    # 평일 09:00 KST (UTC 00:00)
+  #   - cron: "30 4 * * 1-5"   # 평일 13:30 KST (UTC 04:30)
+  #   - cron: "0 8 * * 1-5"    # 평일 17:00 KST (UTC 08:00)
+  # push:
+  #   branches: [main]
+  workflow_dispatch:           # 수동 실행만 허용
     inputs:
       mode:
         description: "실행 모드"

@@ -34,6 +34,7 @@ from __future__ import annotations
 import os
 import sys
 import json
+import time
 import argparse
 import logging
 import urllib.request
@@ -54,6 +55,13 @@ JIRA_BASE_URL      = f"https://{JIRA_SITE}"
 API_BASE           = f"{JIRA_BASE_URL}/rest/api/3"
 KST                = timezone(timedelta(hours=9))
 EXPIRY_ALERT_HOURS = 6
+
+# 이슈 캐시: 동일 GitHub Actions run 안에서 여러 스크립트가 재사용
+ISSUE_CACHE_FILE = ".fm2026_issue_cache.json"
+ISSUE_CACHE_TTL  = 600  # 10분 — 같은 스케줄러 실행 내에서 재사용
+
+# 댓글 지연 로드용 인메모리 캐시 (스크립트 실행 단위로 유지)
+_comment_cache: dict[str, list[dict]] = {}
 
 # 주요 산출물 문서 유형 (현행화 체크 대상)
 KEY_DELIVERABLE_KEYWORDS = [
@@ -218,37 +226,75 @@ def jira_post_comment(issue_key: str, body_text: str) -> dict:
         return json.loads(resp.read().decode())
 
 
-def fetch_all_issues(since_date: str | None = None) -> list[dict]:
-    """FM2026 전체 이슈 조회 — POST /rest/api/3/search/jql (nextPageToken 커서 방식)"""
+def _fetch_issues_from_api(since_date: str | None, active_only: bool) -> list[dict]:
+    """Jira API에서 이슈 조회 (내부 구현)"""
     issues: list[dict] = []
-    max_results = 50
+    # 필요한 필드만 요청 — comment/description 제거로 응답 크기 대폭 감소
     fields = [
-        "summary", "status", "issuetype", "assignee", "reporter",
-        "created", "updated", "duedate", "priority", "description",
-        "comment", "attachment", "labels", "components", "parent",
+        "summary", "status", "assignee",
+        "updated", "duedate", "priority", "attachment",
     ]
-    jql_base = f'project = "{PROJECT_KEY}"'
+    jql_parts = [f'project = "{PROJECT_KEY}"']
     if since_date:
-        jql_base += f' AND updated >= "{since_date}"'
-    jql = jql_base + " ORDER BY updated DESC"
+        jql_parts.append(f'updated >= "{since_date}"')
+    if active_only:
+        jql_parts.append('status NOT IN ("완료", "종료", "취소됨", "Done", "Closed", "Cancelled")')
+    jql = " AND ".join(jql_parts) + " ORDER BY updated DESC"
 
     log.info("JQL: %s", jql)
     next_page_token: str | None = None
     while True:
-        payload: dict = {"jql": jql, "maxResults": max_results, "fields": fields}
+        payload: dict = {"jql": jql, "maxResults": 100, "fields": fields}
         if next_page_token:
             payload["nextPageToken"] = next_page_token
         data = jira_post_search(payload)
         batch = data.get("issues", [])
-        log.info("페이지 조회: %d건 (nextPageToken=%s)", len(batch), bool(data.get("nextPageToken")))
         if not batch:
             break
         issues.extend(batch)
-        log.info("이슈 누계: %d건", len(issues))
+        log.info("이슈 조회: %d건 누계", len(issues))
         next_page_token = data.get("nextPageToken")
         if not next_page_token:
             break
     log.info("이슈 조회 완료: 총 %d건", len(issues))
+    return issues
+
+
+def fetch_all_issues(
+    since_date: str | None = None,
+    use_cache: bool = True,
+    active_only: bool = False,
+) -> list[dict]:
+    """
+    FM2026 이슈 조회.
+    - use_cache=True: 10분 이내 캐시 파일이 있으면 재사용 (API 호출 절약)
+    - since_date: 이 날짜 이후 업데이트된 이슈만 조회 (증분 조회)
+    - active_only: 완료/종료 이슈 제외
+    """
+    # 증분 조회는 캐시 대상 아님
+    if use_cache and not since_date:
+        try:
+            if os.path.exists(ISSUE_CACHE_FILE):
+                with open(ISSUE_CACHE_FILE, encoding="utf-8") as f:
+                    cache = json.load(f)
+                age = time.time() - cache.get("ts", 0)
+                if age < ISSUE_CACHE_TTL:
+                    cached = cache.get("issues", [])
+                    log.info("이슈 캐시 재사용 (%.0f초 전, %d건)", age, len(cached))
+                    return cached
+        except Exception as e:
+            log.debug("캐시 로드 실패: %s", e)
+
+    issues = _fetch_issues_from_api(since_date, active_only)
+
+    # 전체 조회 결과만 캐시 저장
+    if not since_date:
+        try:
+            with open(ISSUE_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"ts": time.time(), "issues": issues}, f)
+        except Exception as e:
+            log.debug("캐시 저장 실패: %s", e)
+
     return issues
 
 
@@ -276,26 +322,41 @@ def extract_text_from_adf(node: dict | None) -> str:
     return text
 
 
+def _fetch_comments(issue_key: str) -> list[dict]:
+    """이슈 댓글만 개별 조회 — 인메모리 캐시로 중복 API 호출 방지"""
+    if issue_key not in _comment_cache:
+        try:
+            data = jira_get(f"/issue/{issue_key}", params={"fields": "comment"})
+            raw  = (data.get("fields", {}).get("comment") or {})
+            _comment_cache[issue_key] = raw.get("comments", [])
+        except Exception as e:
+            log.warning("댓글 조회 실패 %s: %s", issue_key, e)
+            _comment_cache[issue_key] = []
+    return _comment_cache[issue_key]
+
+
 def already_commented(issue: dict, marker: str, today_only: bool = True) -> bool:
-    """동일 유형의 댓글이 이미 존재하는지 확인 (중복 방지)
-    today_only=True: 오늘 날짜 댓글만 중복으로 간주 (날짜가 바뀌면 재알림)
     """
-    comments = (issue["fields"].get("comment") or {}).get("comments", [])
+    동일 유형의 댓글이 이미 존재하는지 확인 (중복 방지).
+    comment 필드가 이슈 dict에 없으면 API로 지연 로드.
+    today_only=True: 오늘 날짜 댓글만 중복으로 간주.
+    """
+    raw = issue["fields"].get("comment")
+    if isinstance(raw, dict) and "comments" in raw:
+        comments = raw["comments"]
+    else:
+        # comment 필드 미포함 조회 → 지연 로드
+        comments = _fetch_comments(issue["key"])
+
     today_str = now_kst().strftime("%Y-%m-%d")
     for c in comments:
         body = c.get("body", "")
-        # ADF dict 또는 plain text 모두 처리
-        if isinstance(body, dict):
-            body_text = extract_text_from_adf(body)
-        else:
-            body_text = str(body)
+        body_text = extract_text_from_adf(body) if isinstance(body, dict) else str(body)
         if marker not in body_text:
             continue
         if not today_only:
             return True
-        # 오늘 날짜 댓글인지 확인 (created 또는 body 내 날짜)
-        created = c.get("created", "")[:10]  # "2026-06-25"
-        if created == today_str:
+        if c.get("created", "")[:10] == today_str:
             return True
     return False
 
@@ -362,18 +423,14 @@ def analyze_attachments(issue: dict) -> tuple[list[dict], list[dict]]:
 
 
 def needs_asis_tobe(issue: dict) -> bool:
-    """2025→2026 개선 대상 이슈 판단"""
-    text = issue["fields"].get("summary", "") + " " + extract_text_from_adf(
-        issue["fields"].get("description")
-    )
+    """2025→2026 개선 대상 이슈 판단 — summary만 사용 (description 미조회)"""
+    text = issue["fields"].get("summary", "")
     return any(kw in text for kw in ASIS_TOBE_KEYWORDS)
 
 
 def needs_currentization(issue: dict) -> tuple[bool, list[str]]:
-    """주요 산출물 현행화 필요 여부 판단 → (True/False, 해당 키워드 목록)"""
-    text = issue["fields"].get("summary", "") + " " + extract_text_from_adf(
-        issue["fields"].get("description")
-    )
+    """주요 산출물 현행화 필요 여부 판단 — summary만 사용 (description 미조회)"""
+    text = issue["fields"].get("summary", "")
     matched = [kw for kw in KEY_DELIVERABLE_KEYWORDS if kw in text]
     return bool(matched), matched
 

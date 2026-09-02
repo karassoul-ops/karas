@@ -11,3 +11,10 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+
+# ios_sideload
+ios_sideload/ota_site/
+*.ipa
+*.p12
+*.mobileprovision
+*.p8

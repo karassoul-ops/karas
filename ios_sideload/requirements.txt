@@ -1,0 +1,4 @@
+pymobiledevice3>=4.0
+cryptography>=42
+PyJWT>=2.8
+requests>=2.31
